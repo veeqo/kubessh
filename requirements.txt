@@ -1,6 +1,8 @@
-kubernetes
-asyncssh
-ptyprocess
-escapism
-traitlets
-ruamel.yaml
+kubernetes==31.0.0
+asyncssh==2.21.1
+ptyprocess==0.7.0
+escapism==1.0.1
+traitlets==5.14.3
+ruamel.yaml==0.18.10
+aiohttp==3.11.18
+simpervisor==1.0.0

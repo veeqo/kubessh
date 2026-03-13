@@ -1,6 +1,12 @@
 # Required to run
 hostKey:
 
+# Log level for the server container. Accepts 'INFO' or 'DEBUG'.
+logLevel: INFO
+
+# Grace period in seconds before a user pod is force-killed after SSH disconnect.
+deleteGracePeriod: 60
+
 replicaCount: 1
 
 image:
@@ -29,3 +35,7 @@ auth:
   type: github
   github:
     allowedUsers: []
+    allowedTeams: []
+    # A GitHub personal access token with read:org scope.
+    # Required when allowedTeams is set.
+    token: ""

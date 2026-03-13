@@ -97,19 +97,36 @@ class KubeSSH(Application):
                 process.stdout.write(next(spinner).encode('ascii'))
 
         await pod.execute(process)
+        pod.schedule_delete_pod()
 
     def init_logging(self):
         """
-        Fix logging so both asyncssh & traitlet logging works
+        Fix logging so both asyncssh & traitlet logging works.
+
+        Traitlets Application logging does not always attach a root
+        StreamHandler, so logs can propagate into the void.  We
+        ensure a stderr handler exists on the root logger and wire
+        everything through it.
         """
-        self.log.setLevel(logging.DEBUG if self.debug else logging.INFO)
+        log_level = logging.DEBUG if self.debug else logging.INFO
+
+        # Guarantee at least one StreamHandler on the root logger
+        root = logging.getLogger()
+        if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter(
+                '%(asctime)s %(levelname)s %(name)s: %(message)s'
+            ))
+            root.addHandler(handler)
+        root.setLevel(log_level)
+
+        self.log.setLevel(log_level)
         self.log.propagate = True
-        UserPod.log = self.log
 
         asyncssh_logger = logging.getLogger('asyncssh')
         asyncssh_logger.propagate = True
         asyncssh_logger.parent = self.log
-        asyncssh_logger.setLevel(self.log.level)
+        asyncssh_logger.setLevel(log_level)
 
 
     def initialize(self, *args, **kwargs):

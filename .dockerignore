@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+docs
+tests
+*.md
+!requirements.txt
+dev-requirements.txt
+helm-chart/kubessh
+helm-chart/chartpress.yaml
+helm-chart/.helmignore
+__pycache__
+*.pyc
+*.pyo
+.eggs
+*.egg-info

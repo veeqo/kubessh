@@ -21,6 +21,7 @@ spec:
       annotations:
         checksum/config-map: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+        kubectl.kubernetes.io/default-container: "server"
     spec:
       {{ if .Values.rbac.enabled }}
       serviceAccountName: {{ template "..fullname" . }}
@@ -33,18 +34,15 @@ spec:
           configMap:
             name: {{ template "..fullname" . }}
       containers:
-        - name: cleanup
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command:
-            - python3
-            - -m
-            - kubessh.cleanup
         - name: server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - kubessh
+          {{- if .Values.env }}
+          env:
+{{ toYaml .Values.env | indent 12 }}
+          {{- end }}
           volumeMounts:
             - name: secrets
               mountPath: /etc/kubessh/secrets
@@ -64,6 +62,13 @@ spec:
               port: ssh
           resources:
 {{ toYaml .Values.resources | indent 12 }}
+        - name: cleanup
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python3
+            - -m
+            - kubessh.cleanup
     {{- with .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml . | indent 8 }}
