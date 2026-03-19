@@ -2,7 +2,10 @@ FROM --platform=linux/amd64 python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl > /usr/local/bin/kubectl
+RUN curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl > /usr/local/bin/kubectl \
+    && curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl.sha256 > /tmp/kubectl.sha256 \
+    && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
+    && rm /tmp/kubectl.sha256
 RUN chmod +x /usr/local/bin/kubectl
 
 COPY . /srv/kubessh

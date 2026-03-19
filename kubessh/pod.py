@@ -32,6 +32,10 @@ v1 = k.CoreV1Api()
 # reconnects before the timer fires we cancel it.
 _pending_deletions = {}
 
+# Active session count per pod name.  Deletion is only scheduled
+# when the count drops to zero.
+_active_sessions = {}
+
 class PodState(Enum):
     UNKNOWN = 0
     STARTING = 1
@@ -224,12 +228,18 @@ class UserPod(LoggingConfigurable):
             else:
                 raise
 
-        if pod and pod.status.phase == 'Running':
-            # Pod exists, and is running. Cancel any pending deletion.
+        # Cancel any pending deletion as soon as we see the pod exists
+        # in a non-terminal phase (user is reconnecting)
+        if pod and pod.status.phase not in ('Failed', 'Succeeded'):
             if self.pod_name in _pending_deletions:
                 _pending_deletions[self.pod_name].cancel()
                 del _pending_deletions[self.pod_name]
                 self.log.info(f"Cancelled pending deletion for {self.pod_name} (user reconnected)")
+
+        if pod and pod.status.phase == 'Running':
+            # Track this session
+            _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
+            self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
             self.pod = pod
             yield PodState.RUNNING
             return
@@ -283,6 +293,9 @@ class UserPod(LoggingConfigurable):
                 v1.read_namespaced_pod,
                 pod.metadata.name, pod.metadata.namespace
             )
+        # Track this session (new pod path)
+        _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
+        self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
         yield PodState.RUNNING
 
     async def _do_delete_pod(self):
@@ -302,6 +315,7 @@ class UserPod(LoggingConfigurable):
                 self.log.warning(f"Failed to delete pod {self.pod_name}: {e}")
         finally:
             _pending_deletions.pop(self.pod_name, None)
+            _active_sessions.pop(self.pod_name, None)
 
     async def _delayed_delete(self):
         """Wait for the grace period, then delete the pod (unless screen is running)."""
@@ -338,6 +352,16 @@ class UserPod(LoggingConfigurable):
 
     def schedule_delete_pod(self):
         """Schedule a delayed pod deletion. Cancellable if the user reconnects."""
+        # Decrement session count
+        count = _active_sessions.get(self.pod_name, 1) - 1
+        _active_sessions[self.pod_name] = max(count, 0)
+
+        if count > 0:
+            self.log.info(
+                f"{count} active session(s) remain for {self.pod_name}, skipping deletion"
+            )
+            return
+
         if self.pod_name in _pending_deletions:
             # Already scheduled, nothing to do
             return

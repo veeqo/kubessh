@@ -18,9 +18,7 @@ if config['auth']['type'] == 'github':
     c.KubeSSH.authenticator_class = GitHubAuthenticator
     c.GitHubAuthenticator.allowed_users = config['auth']['github'].get('allowedUsers', [])
     c.GitHubAuthenticator.allowed_teams = config['auth']['github'].get('allowedTeams', [])
-    github_token = config['auth']['github'].get('token', '')
-    if github_token:
-        c.GitHubAuthenticator.github_token = github_token
+    # GitHub token is sourced from GITHUB_TOKEN env var only (not stored in ConfigMap)
 elif config['auth']['type'] == 'gitlab':
     c.KubeSSH.authenticator_class = GitLabAuthenticator
     c.KubeSSH.authenticator_class.instance_url = config['auth']['gitlab']['instanceUrl']

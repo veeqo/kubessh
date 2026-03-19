@@ -36,6 +36,5 @@ auth:
   github:
     allowedUsers: []
     allowedTeams: []
-    # A GitHub personal access token with read:org scope.
-    # Required when allowedTeams is set.
-    token: ""
+    # GitHub token should be provided via GITHUB_TOKEN env var, not here.
+    # See deployment env section or use a Kubernetes Secret.
