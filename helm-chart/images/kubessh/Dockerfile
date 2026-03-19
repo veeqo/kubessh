@@ -1,9 +1,13 @@
-FROM --platform=linux/amd64 python:3.12-slim
+FROM python:3.12-slim
+
+# TARGETARCH is automatically set by Docker buildx (e.g. amd64, arm64).
+# Default to amd64 for plain `docker build` without --platform.
+ARG TARGETARCH=amd64
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl > /usr/local/bin/kubectl \
-    && curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl.sha256 > /tmp/kubectl.sha256 \
+RUN curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/${TARGETARCH}/kubectl > /usr/local/bin/kubectl \
+    && curl -fL https://dl.k8s.io/release/v1.35.2/bin/linux/${TARGETARCH}/kubectl.sha256 > /tmp/kubectl.sha256 \
     && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
     && rm /tmp/kubectl.sha256
 RUN chmod +x /usr/local/bin/kubectl

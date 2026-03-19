@@ -27,13 +27,13 @@ except kubernetes.config.ConfigException:
 # FIXME: Figure out if making this global is a problem
 v1 = k.CoreV1Api()
 
-# Pending pod deletion tasks, keyed by pod name.
+# Pending pod deletion tasks, keyed by (namespace, pod_name).
 # When a session ends we schedule a delayed delete; if the user
 # reconnects before the timer fires we cancel it.
 _pending_deletions = {}
 
-# Active session count per pod name.  Deletion is only scheduled
-# when the count drops to zero.
+# Active session count per (namespace, pod_name).  Deletion is only
+# scheduled when the count drops to zero.
 _active_sessions = {}
 
 class PodState(Enum):
@@ -184,6 +184,11 @@ class UserPod(LoggingConfigurable):
         # global threadpool with well enforced limits #FIXME
         self.kube_api_threadpool = ThreadPoolExecutor(1)
 
+    @property
+    def _pod_key(self):
+        """Unique key for this pod across namespaces, used for global state dicts."""
+        return (self.namespace, self.pod_name)
+
     def _run_in_executor(self, func, *args, **kwargs):
         return asyncio.get_event_loop().run_in_executor(self.kube_api_threadpool, functools.partial(func, *args, **kwargs))
 
@@ -231,15 +236,15 @@ class UserPod(LoggingConfigurable):
         # Cancel any pending deletion as soon as we see the pod exists
         # in a non-terminal phase (user is reconnecting)
         if pod and pod.status.phase not in ('Failed', 'Succeeded'):
-            if self.pod_name in _pending_deletions:
-                _pending_deletions[self.pod_name].cancel()
-                del _pending_deletions[self.pod_name]
+            if self._pod_key in _pending_deletions:
+                _pending_deletions[self._pod_key].cancel()
+                del _pending_deletions[self._pod_key]
                 self.log.info(f"Cancelled pending deletion for {self.pod_name} (user reconnected)")
 
         if pod and pod.status.phase == 'Running':
             # Track this session
-            _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
-            self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
+            _active_sessions[self._pod_key] = _active_sessions.get(self._pod_key, 0) + 1
+            self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self._pod_key]}")
             self.pod = pod
             yield PodState.RUNNING
             return
@@ -294,8 +299,8 @@ class UserPod(LoggingConfigurable):
                 pod.metadata.name, pod.metadata.namespace
             )
         # Track this session (new pod path)
-        _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
-        self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
+        _active_sessions[self._pod_key] = _active_sessions.get(self._pod_key, 0) + 1
+        self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self._pod_key]}")
         yield PodState.RUNNING
 
     async def _do_delete_pod(self):
@@ -314,8 +319,8 @@ class UserPod(LoggingConfigurable):
             else:
                 self.log.warning(f"Failed to delete pod {self.pod_name}: {e}")
         finally:
-            _pending_deletions.pop(self.pod_name, None)
-            _active_sessions.pop(self.pod_name, None)
+            _pending_deletions.pop(self._pod_key, None)
+            _active_sessions.pop(self._pod_key, None)
 
     async def _delayed_delete(self):
         """Wait for the grace period, then delete the pod (unless screen is running)."""
@@ -329,7 +334,7 @@ class UserPod(LoggingConfigurable):
             self.log.info(
                 f"Screen session detected in {self.pod_name}, skipping deletion"
             )
-            _pending_deletions.pop(self.pod_name, None)
+            _pending_deletions.pop(self._pod_key, None)
             return
 
         await self._do_delete_pod()
@@ -353,8 +358,8 @@ class UserPod(LoggingConfigurable):
     def schedule_delete_pod(self):
         """Schedule a delayed pod deletion. Cancellable if the user reconnects."""
         # Decrement session count
-        count = _active_sessions.get(self.pod_name, 1) - 1
-        _active_sessions[self.pod_name] = max(count, 0)
+        count = _active_sessions.get(self._pod_key, 1) - 1
+        _active_sessions[self._pod_key] = max(count, 0)
 
         if count > 0:
             self.log.info(
@@ -362,11 +367,11 @@ class UserPod(LoggingConfigurable):
             )
             return
 
-        if self.pod_name in _pending_deletions:
+        if self._pod_key in _pending_deletions:
             # Already scheduled, nothing to do
             return
         task = asyncio.ensure_future(self._delayed_delete())
-        _pending_deletions[self.pod_name] = task
+        _pending_deletions[self._pod_key] = task
 
     async def execute(self, ssh_process):
         command = shlex.split(ssh_process.command) if ssh_process.command else ["/bin/bash", "-l"]
@@ -424,10 +429,12 @@ class UserPod(LoggingConfigurable):
             if not read_stdin.done():
                 read_stdin.cancel()
             else:
-                # Consume the exception so it doesn't get logged as unhandled
+                # Consume the exception so it doesn't get logged as unhandled.
+                # asyncio.CancelledError is a BaseException on Python 3.11+, so
+                # catch it explicitly in addition to Exception.
                 try:
                     read_stdin.result()
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     pass
 
             ssh_process.exit(shell_completed.result())

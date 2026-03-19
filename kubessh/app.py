@@ -114,7 +114,7 @@ class KubeSSH(Application):
         try:
             await pod.execute(process)
         except Exception:
-            self.log.info(f"Session ended for {username} (connection lost or error)")
+            self.log.exception(f"Session error for {username}")
         finally:
             pod.schedule_delete_pod()
 
