@@ -15,7 +15,7 @@ import shlex
 import string
 from concurrent.futures import ThreadPoolExecutor
 from traitlets.config import LoggingConfigurable
-from traitlets import Dict, Unicode, List, default
+from traitlets import Dict, Unicode, List, Integer, default
 
 from .serialization import make_api_object_from_dict
 
@@ -26,6 +26,15 @@ except kubernetes.config.ConfigException:
 
 # FIXME: Figure out if making this global is a problem
 v1 = k.CoreV1Api()
+
+# Pending pod deletion tasks, keyed by pod name.
+# When a session ends we schedule a delayed delete; if the user
+# reconnects before the timer fires we cancel it.
+_pending_deletions = {}
+
+# Active session count per pod name.  Deletion is only scheduled
+# when the count drops to zero.
+_active_sessions = {}
 
 class PodState(Enum):
     UNKNOWN = 0
@@ -48,7 +57,11 @@ class UserPod(LoggingConfigurable):
         {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {},
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/default-container": "shell"
+                }
+            },
             "spec": {
                 "automountServiceAccountToken": False,
                 "containers": [
@@ -84,6 +97,15 @@ class UserPod(LoggingConfigurable):
         name of the user that the shell belongs to. In order to use the created
         persistent volumes, they should be referenced in the pod_template's
         spec.volumes.
+        """,
+        config=True
+    )
+
+    delete_grace_period = Integer(
+        60,
+        help="""
+        Grace period in seconds when deleting a user pod after the SSH
+        session ends.  Set to 0 for immediate termination.
         """,
         config=True
     )
@@ -206,8 +228,18 @@ class UserPod(LoggingConfigurable):
             else:
                 raise
 
+        # Cancel any pending deletion as soon as we see the pod exists
+        # in a non-terminal phase (user is reconnecting)
+        if pod and pod.status.phase not in ('Failed', 'Succeeded'):
+            if self.pod_name in _pending_deletions:
+                _pending_deletions[self.pod_name].cancel()
+                del _pending_deletions[self.pod_name]
+                self.log.info(f"Cancelled pending deletion for {self.pod_name} (user reconnected)")
+
         if pod and pod.status.phase == 'Running':
-            # Pod exists, and is running. Nothing to do
+            # Track this session
+            _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
+            self.log.info(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
             self.pod = pod
             yield PodState.RUNNING
             return
@@ -261,7 +293,80 @@ class UserPod(LoggingConfigurable):
                 v1.read_namespaced_pod,
                 pod.metadata.name, pod.metadata.namespace
             )
+        # Track this session (new pod path)
+        _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
+        self.log.info(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
         yield PodState.RUNNING
+
+    async def _do_delete_pod(self):
+        """Actually delete the pod after the grace delay has elapsed."""
+        try:
+            await self._run_in_executor(
+                v1.delete_namespaced_pod,
+                self.pod_name,
+                self.namespace,
+                body=k.V1DeleteOptions(grace_period_seconds=0)
+            )
+            self.log.info(f"Deleted pod {self.pod_name}")
+        except kubernetes.client.rest.ApiException as e:
+            if e.status == 404:
+                self.log.info(f"Pod {self.pod_name} already gone")
+            else:
+                self.log.warning(f"Failed to delete pod {self.pod_name}: {e}")
+        finally:
+            _pending_deletions.pop(self.pod_name, None)
+            _active_sessions.pop(self.pod_name, None)
+
+    async def _delayed_delete(self):
+        """Wait for the grace period, then delete the pod (unless screen is running)."""
+        self.log.info(
+            f"Scheduling deletion of {self.pod_name} in {self.delete_grace_period}s"
+        )
+        await asyncio.sleep(self.delete_grace_period)
+
+        # Check if screen is running inside the pod before deleting
+        if await self._has_screen_session():
+            self.log.info(
+                f"Screen session detected in {self.pod_name}, skipping deletion"
+            )
+            _pending_deletions.pop(self.pod_name, None)
+            return
+
+        await self._do_delete_pod()
+
+    async def _has_screen_session(self):
+        """Check if a screen process is running inside the user pod."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'kubectl', '--namespace', self.namespace,
+                'exec', '-c', 'shell', self.pod_name,
+                '--', 'pgrep', '-x', 'screen',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            returncode = await proc.wait()
+            return returncode == 0
+        except Exception as e:
+            self.log.warning(f"Failed to check for screen in {self.pod_name}: {e}")
+            return False
+
+    def schedule_delete_pod(self):
+        """Schedule a delayed pod deletion. Cancellable if the user reconnects."""
+        # Decrement session count
+        count = _active_sessions.get(self.pod_name, 0) - 1
+        _active_sessions[self.pod_name] = max(count, 0)
+        self.log.info(
+            f"Session ended for {self.pod_name}, active sessions: {max(count, 0)}"
+        )
+
+        if count > 0:
+            return
+
+        if self.pod_name in _pending_deletions:
+            # Already scheduled, nothing to do
+            return
+        task = asyncio.ensure_future(self._delayed_delete())
+        _pending_deletions[self.pod_name] = task
 
     async def execute(self, ssh_process):
         command = shlex.split(ssh_process.command) if ssh_process.command else ["/bin/bash", "-l"]
@@ -314,6 +419,16 @@ class UserPod(LoggingConfigurable):
             if ssh_process.stdin.at_eof() and not shell_completed.done():
                 await loop.run_in_executor(ThreadPoolExecutor(1), lambda: process.terminate(force=True))
                 self.log.info('Terminated process')
+
+            # Cancel any pending stdin read to avoid "Task exception was never retrieved"
+            if not read_stdin.done():
+                read_stdin.cancel()
+            else:
+                # Consume the exception so it doesn't get logged as unhandled
+                try:
+                    read_stdin.result()
+                except BaseException:
+                    pass
 
             ssh_process.exit(shell_completed.result())
         else:
