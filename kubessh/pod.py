@@ -427,7 +427,7 @@ class UserPod(LoggingConfigurable):
                 # Consume the exception so it doesn't get logged as unhandled
                 try:
                     read_stdin.result()
-                except Exception:
+                except BaseException:
                     pass
 
             ssh_process.exit(shell_completed.result())
