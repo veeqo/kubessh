@@ -239,7 +239,7 @@ class UserPod(LoggingConfigurable):
         if pod and pod.status.phase == 'Running':
             # Track this session
             _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
-            self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
+            self.log.info(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
             self.pod = pod
             yield PodState.RUNNING
             return
@@ -295,7 +295,7 @@ class UserPod(LoggingConfigurable):
             )
         # Track this session (new pod path)
         _active_sessions[self.pod_name] = _active_sessions.get(self.pod_name, 0) + 1
-        self.log.debug(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
+        self.log.info(f"Active sessions for {self.pod_name}: {_active_sessions[self.pod_name]}")
         yield PodState.RUNNING
 
     async def _do_delete_pod(self):
@@ -353,13 +353,13 @@ class UserPod(LoggingConfigurable):
     def schedule_delete_pod(self):
         """Schedule a delayed pod deletion. Cancellable if the user reconnects."""
         # Decrement session count
-        count = _active_sessions.get(self.pod_name, 1) - 1
+        count = _active_sessions.get(self.pod_name, 0) - 1
         _active_sessions[self.pod_name] = max(count, 0)
+        self.log.info(
+            f"Session ended for {self.pod_name}, active sessions: {max(count, 0)}"
+        )
 
         if count > 0:
-            self.log.info(
-                f"{count} active session(s) remain for {self.pod_name}, skipping deletion"
-            )
             return
 
         if self.pod_name in _pending_deletions:
