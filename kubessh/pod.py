@@ -304,12 +304,37 @@ class UserPod(LoggingConfigurable):
             _pending_deletions.pop(self.pod_name, None)
 
     async def _delayed_delete(self):
-        """Wait for the grace period, then delete the pod."""
+        """Wait for the grace period, then delete the pod (unless screen is running)."""
         self.log.info(
             f"Scheduling deletion of {self.pod_name} in {self.delete_grace_period}s"
         )
         await asyncio.sleep(self.delete_grace_period)
+
+        # Check if screen is running inside the pod before deleting
+        if await self._has_screen_session():
+            self.log.info(
+                f"Screen session detected in {self.pod_name}, skipping deletion"
+            )
+            _pending_deletions.pop(self.pod_name, None)
+            return
+
         await self._do_delete_pod()
+
+    async def _has_screen_session(self):
+        """Check if a screen process is running inside the user pod."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'kubectl', '--namespace', self.namespace,
+                'exec', '-c', 'shell', self.pod_name,
+                '--', 'pgrep', '-x', 'screen',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            returncode = await proc.wait()
+            return returncode == 0
+        except Exception as e:
+            self.log.warning(f"Failed to check for screen in {self.pod_name}: {e}")
+            return False
 
     def schedule_delete_pod(self):
         """Schedule a delayed pod deletion. Cancellable if the user reconnects."""
@@ -370,6 +395,16 @@ class UserPod(LoggingConfigurable):
             if ssh_process.stdin.at_eof() and not shell_completed.done():
                 await loop.run_in_executor(ThreadPoolExecutor(1), lambda: process.terminate(force=True))
                 self.log.info('Terminated process')
+
+            # Cancel any pending stdin read to avoid "Task exception was never retrieved"
+            if not read_stdin.done():
+                read_stdin.cancel()
+            else:
+                # Consume the exception so it doesn't get logged as unhandled
+                try:
+                    read_stdin.result()
+                except Exception:
+                    pass
 
             ssh_process.exit(shell_completed.result())
         else:

@@ -17,6 +17,21 @@ from kubessh.authentication import Authenticator
 from kubessh.authentication.github import GitHubAuthenticator
 
 
+# Suppress noisy asyncssh INFO messages (connection accepted, local/peer
+# address, version strings) while keeping useful ones (auth, channel).
+_NOISY_PATTERNS = (
+    'Accepted SSH client connection',
+    'Local address:',
+    'Peer address:',
+    'Sending version',
+)
+
+class _AsyncSSHNoiseFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(p in msg for p in _NOISY_PATTERNS)
+
+
 class KubeSSH(Application):
     config_file = Unicode(
         'kubessh_config.py',
@@ -96,8 +111,12 @@ class KubeSSH(Application):
                 process.stdout.write('\b'.encode('ascii'))
                 process.stdout.write(next(spinner).encode('ascii'))
 
-        await pod.execute(process)
-        pod.schedule_delete_pod()
+        try:
+            await pod.execute(process)
+        except Exception:
+            self.log.info(f"Session ended for {username} (connection lost or error)")
+        finally:
+            pod.schedule_delete_pod()
 
     def init_logging(self):
         """
@@ -127,6 +146,9 @@ class KubeSSH(Application):
         asyncssh_logger.propagate = True
         asyncssh_logger.parent = self.log
         asyncssh_logger.setLevel(log_level)
+
+        if not self.debug:
+            asyncssh_logger.addFilter(_AsyncSSHNoiseFilter())
 
 
     def initialize(self, *args, **kwargs):
